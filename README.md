@@ -11,7 +11,7 @@ You must have [fzf](https://github.com/junegunn/fzf) installed.
 curl
 
 ```bash
-curl -fsSLo https://github.com/thisisibrahimd/repos/releases/download/latest/repos
+curl -fsSL https://github.com/thisisibrahimd/repos/releases/download/latest/repos -o ~/.local/bin/repos
 ```
 
 mise
