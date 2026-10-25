@@ -45,7 +45,7 @@ eval "$(repos init zsh)"
 It reflects the url paths that repos are usually stored in from Github, Gitlab, and
 other git hosts.
 
-```(<repos-dir>/<git-host-domain>/<repo-owner>/<repo-name>)````
+```<repos-dir>/<git-host-domain>/<repo-owner>/<repo-name>```
 
 ```bash
 # your default repos dir
