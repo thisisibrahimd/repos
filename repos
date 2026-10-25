@@ -59,6 +59,11 @@ _init() {
   cat <<EOF
 # repos.sh init: $shell
 $(declare -f repos)
+# =============================================================================
+#
+# To initialize repos, add this to your shell configuration file:
+#
+# eval "\$\(repos init $shell\)"
 EOF
 }
 
