@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -eu -o pipefail
+
+REPOS_DIR="${REPOS_DIR:-$HOME/repos}"
+
+_repos() {
+  if [[ ! -d "$REPOS_DIR" ]]; then
+    printf 'Repository directory not found: %s\n' "$REPOS_DIR" >&2
+    return 1
+  fi
+  if ! command -v fzf >/dev/null 2>&1; then
+    printf 'fzf not found in PATH\n' >&2
+    return 1
+  fi
+
+  local dir
+  dir=$(
+    find "$REPOS_DIR" -type d -mindepth 3 -maxdepth 3 |
+    rev |
+    cut -d/ -f1-3 |
+    rev |
+    fzf
+  ) || return 0
+  printf '%s' "$dir"
+}
+
+repos() {
+  local dir
+  dir=$(repos) || return
+  if [[ -n "$dir" ]]; then
+    builtin cd -- "$dir"
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+repos — hop between your repos in ease
+
+Env:
+  REPOS_DIR               Directory containing repositories in URL format (default: $HOME/repos).
+
+Usage:
+  repos                   Filter through your repos and select the one to cd into.
+  repos init [bash|zsh]   Print shell hook.
+  repos --help            Print usage instructions.
+EOF
+}
+
+_init() {
+  local shell=bash
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      bash|zsh) shell="$1" ;;
+      *) printf 'repos.sh init: unexpected shell: %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+
+  cat <<EOF
+# repos.sh init: $shell
+$(declare -f repos)
+EOF
+}
+
+main() {
+  case "${1:-}" in
+    init) shift; _init "$@" ;;
+    help|-h|--help) usage ;;
+    "") _repos >&2; return 2 ;;
+    *) printf 'repos.sh: unknown command: %s\n' "$1" >&2; usage >&2; return 2 ;;
+  esac
+}
+
+main "$@"
