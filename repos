@@ -3,6 +3,12 @@ set -eu -o pipefail
 
 REPOS_DIR="${REPOS_DIR:-$HOME/repos}"
 
+# Jev (typesafe.ai) System One API — used only by `repos launch`.
+JEV_ENDPOINT="${JEV_ENDPOINT:-https://api.typesafe.ai/v1/systemone}"
+JEV_MODEL="${JEV_MODEL:-jev-latest}"
+# Minimum calibrated confidence for launch to move you without asking.
+JEV_CONFIDENCE="${JEV_CONFIDENCE:-0.5}"
+
 _repos() {
   if [[ ! -d "$REPOS_DIR" ]]; then
     printf 'Repository directory not found: %s\n' "$REPOS_DIR" >&2
@@ -24,6 +30,121 @@ _repos() {
   printf '%s' "$REPOS_DIR/$dir"
 }
 
+# Resolve the TypeSafe/Jev API key: the official env var first, then the
+# JEV_KEY testing alias, then a local .env (git-ignored) carrying either.
+_jev_key() {
+  if [[ -n "${REPOS_TYPESAFE_API_KEY:-}" ]]; then
+    printf '%s' "$REPOS_TYPESAFE_API_KEY"
+  elif [[ -n "${JEV_KEY:-}" ]]; then
+    printf '%s' "$JEV_KEY"
+  elif [[ -f .env ]]; then
+    sed -nE 's/^[[:space:]]*(REPOS_TYPESAFE_API_KEY|JEV_KEY)[[:space:]]*=[[:space:]]*//p' .env |
+      head -1 | tr -d '\r'
+  fi
+}
+
+# One-line, tab/newline-free descriptor of a repo from cheap local git facts.
+_repo_descriptor() {
+  local abs="$1" remote bare readme branches commits
+  remote=$(git -C "$abs" config --get remote.origin.url 2>/dev/null || true)
+  bare=$(git -C "$abs" rev-parse --is-bare-repository 2>/dev/null || true)
+  branches=$(git -C "$abs" for-each-ref --count=6 --format='%(refname:short)' refs/heads 2>/dev/null | tr '\n' ' ')
+  commits=$(git -C "$abs" log --no-merges -3 --pretty=%s 2>/dev/null | tr '\n' ' ')
+  if [[ "$bare" == "true" ]]; then
+    readme=$(git -C "$abs" show HEAD:README.md 2>/dev/null | grep -m1 '^#')
+  else
+    readme=$(head -30 "$abs/README.md" "$abs/README" "$abs/readme.md" 2>/dev/null | grep -m1 '^#')
+  fi
+  # host/owner/name is already the choice key; the descriptor adds signal.
+  printf 'remote=%s | readme="%s" | branches=%s | recent=%s' \
+    "${remote:-none}" "${readme:-}" "${branches:-none}" "${commits:-none}" |
+    tr '\t\n' '  '
+}
+
+_launch() {
+  local description="${1:-}"
+  if [[ -z "$description" ]]; then
+    printf 'usage: repos launch "<plain-language description>"\n' >&2
+    return 2
+  fi
+  if [[ ! -d "$REPOS_DIR" ]]; then
+    printf 'Repository directory not found: %s\n' "$REPOS_DIR" >&2
+    return 1
+  fi
+
+  local key
+  key=$(_jev_key)
+  if [[ -z "$key" ]]; then
+    printf 'launch: no REPOS_TYPESAFE_API_KEY set (env or ./.env) — falling back to fuzzy picker\n' >&2
+    printf 'Tip: r  (no key needed)\n' >&2
+    return 1
+  fi
+  command -v jq >/dev/null 2>&1 || { printf 'launch: jq not found in PATH\n' >&2; return 1; }
+  command -v curl >/dev/null 2>&1 || { printf 'launch: curl not found in PATH\n' >&2; return 1; }
+
+  # Build a "rel<TAB>descriptor" table for every depth-3 repo.
+  local table rel abs
+  table=""
+  while IFS= read -r abs; do
+    rel="${abs#"$REPOS_DIR"/}"
+    table+="$rel"$'\t'"$(_repo_descriptor "$abs")"$'\n'
+  done < <(find "$REPOS_DIR" -type d -mindepth 3 -maxdepth 3 | sort)
+
+  [[ -n "$table" ]] || { printf 'launch: no repositories under %s\n' "$REPOS_DIR" >&2; return 1; }
+
+  # One Jev Choice call: state=description, criteria=every repo (+ none to abstain).
+  local body
+  body=$(printf '%s' "$table" |
+    jq -Rs --arg state "$description" --arg model "$JEV_MODEL" '
+      split("\n") | map(select(length > 0)) | map(split("\t")) |
+      (map({ (.[0]) : .[1] }) + [{ "none": "No repository matches this description." }] | add) as $crit |
+      { state: $state,
+        model: $model,
+        questions: { pick: {
+          type: "choice",
+          instructions: "The state is a description of work someone was doing. Choose the single repository whose descriptor best matches that work; a criterion key is host/owner/name and its value describes the repo. Choose none only if nothing plausibly matches.",
+          criteria: $crit
+        } } }
+    ')
+
+  local resp http_code
+  resp=$(curl --silent --show-error --fail-with-body \
+    -w $'\n%{http_code}' \
+    "$JEV_ENDPOINT" \
+    -H "Authorization: Bearer $key" \
+    -H "Content-Type: application/json" \
+    --data-binary "$body" 2>/dev/null) || {
+      printf 'launch: Jev request failed\n' >&2; return 1; }
+  http_code=${resp##*$'\n'}
+  resp=${resp%$'\n'*}
+  if [[ "$http_code" != 2* ]]; then
+    printf 'launch: Jev HTTP %s\n' "$http_code" >&2
+    printf '%s\n' "$resp" | jq -r '.error.message // .error // "no message"' >&2 2>/dev/null || printf '%s\n' "$resp" >&2
+    return 1
+  fi
+
+  local choice confidence
+  choice=$(printf '%s' "$resp" | jq -r '.answers.pick.choice // "none"')
+  confidence=$(printf '%s' "$resp" | jq -r '.answers.pick.confidence // 0')
+
+  if [[ "$choice" == "none" ]]; then
+    printf 'launch: no repo matched "%s"\n' "$description" >&2
+    return 1
+  fi
+
+  # Below the confidence floor, surface the ranked candidates and abstain
+  # (the rl hook falls back to the picker). Never a silent wrong jump.
+  local high
+  high=$(printf '%s' "$confidence" | jq -r --argjson f "$JEV_CONFIDENCE" '. >= $f')
+  if [[ "$high" != "true" ]]; then
+    printf 'launch: low confidence (%s) for "%s" → candidates:\n' "$confidence" "$description" >&2
+    printf '%s' "$resp" | jq -r '.answers.pick.probabilities | to_entries | sort_by(-.value)[] | "\(.key)  (\(.value))"' >&2
+    return 1
+  fi
+
+  printf '%s' "$REPOS_DIR/$choice"
+}
+
 r() {
   local dir
   dir=$(command repos) || return
@@ -32,17 +153,33 @@ r() {
   fi
 }
 
+rl() {
+  local dir
+  if dir=$(command repos launch "$@"); then
+    if [[ -n "$dir" ]]; then
+      builtin cd -- "$dir"
+      return
+    fi
+  fi
+  # No confident match — fall through to the ordinary picker, never a dead end.
+  r
+}
+
 usage() {
   cat <<'EOF'
 repos — hop between your repos in ease
 
 Env:
   REPOS_DIR               Directory containing repositories in URL format (default: $HOME/repos).
+  JEV_KEY                 TypeSafe API key. Enables `repos launch`. Falls back to fuzzy picker when unset.
+  JEV_CONFIDENCE          Min calibrated confidence (0-1) for launch to jump without asking (default: 0.5).
 
 Usage:
-  r                       Pick repo via fzf and cd into it.
+  r                       Pick repo via fzf and cd into it. (offline, no key)
+  rl "<description>"      Jump to the repo that matches a plain-language description. (needs JEV_KEY)
   repos                   Print picked repo dir (used by shell hook: r).
-  repos init [bash|zsh]   Print shell hook.
+  repos launch "<desc>"   Print the matching repo dir via Jev, or nothing (used by hook: rl).
+  repos init [bash|zsh]   Print shell hooks.
   repos --help            Print usage instructions.
 EOF
 }
@@ -59,18 +196,22 @@ _init() {
 
   cat <<EOF
 # repos init: $shell
-$(declare -f r)
+$(declare -f r rl)
 # =============================================================================
 #
 # To initialize repos, add this to your shell configuration file:
 #
 # eval "\$\(repos init $shell\)"
+#
+#   r                 pick a repo by name (fzf, offline)
+#   rl "..."         jump to the repo matching a description (Jev, needs JEV_KEY)
 EOF
 }
 
 main() {
   case "${1:-}" in
     init) shift; _init "$@" ;;
+    launch) shift; _launch "$@" ;;
     help|-h|--help) usage ;;
     "") _repos ;;
     *) printf 'repos: unknown command: %s\n' "$1" >&2; usage >&2; return 2 ;;
