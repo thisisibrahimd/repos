@@ -3,6 +3,12 @@ set -eu -o pipefail
 
 REPOS_DIR="${REPOS_DIR:-$HOME/repos}"
 
+# Jev (typesafe.ai) System One API — used only by `repos launch`.
+JEV_ENDPOINT="${JEV_ENDPOINT:-https://api.typesafe.ai/v1/systemone}"
+JEV_MODEL="${JEV_MODEL:-jev-latest}"
+# Minimum calibrated confidence for launch to move you without asking.
+JEV_CONFIDENCE="${JEV_CONFIDENCE:-0.5}"
+
 # Shell function shipped to the user's shell via `repos init`. It cannot cd
 # from a child process, so it asks the picker for a path and cds itself.
 r() {
@@ -11,6 +17,19 @@ r() {
   if [[ -n "$dir" ]]; then
     builtin cd -- "$dir"
   fi
+}
+
+# Jump to a repo described in plain language, or fall through to the picker.
+rl() {
+  local dir
+  if dir=$(command repos launch "$@"); then
+    if [[ -n "$dir" ]]; then
+      builtin cd -- "$dir"
+      return
+    fi
+  fi
+  # No confident match — fall through to the picker, never a dead end.
+  r
 }
 
 # --- helpers ---------------------------------------------------------------
@@ -24,6 +43,15 @@ _repos_kind() {
   elif [[ -f "$1/HEAD" ]]; then
     printf 'bare'
   fi
+}
+
+# Print absolute paths of every repo under REPOS_DIR, detected by content.
+# Shared by the picker and by `repos launch` so both see the same set.
+_repos_repo_dirs() {
+  find "$REPOS_DIR" -mindepth 2 -type d \
+    \( \( -name '*.git' ! -name '.git' -exec test -e '{}/HEAD' \; \) \
+       -o -exec test -e '{}/.git' \; \) \
+    -prune -print
 }
 
 # Parse a clone/create source into _SRC_HOST/_SRC_OWNER/_SRC_REPO/_SRC_URL.
@@ -286,10 +314,7 @@ _repos() {
   local tab=$'\t'
   local sel
   sel=$(
-    find "$REPOS_DIR" -mindepth 2 -type d \
-      \( \( -name '*.git' ! -name '.git' -exec test -e '{}/HEAD' \; \) \
-         -o -exec test -e '{}/.git' \; \) \
-      -prune -print |
+    _repos_repo_dirs |
     while IFS= read -r d; do
       rel=${d#"$REPOS_DIR/"}
       # A directory name containing a tab would corrupt the label columns.
@@ -350,6 +375,185 @@ _repos() {
   printf '%s' "${wt_paths[$idx]}"
 }
 
+#######################################
+# Resolve the TypeSafe/Jev API key from env vars or ./.env.
+# Globals:
+#   REPOS_TYPESAFE_API_KEY, JEV_KEY
+# Arguments:
+#   None
+# Outputs:
+#   Writes the API key to stdout.
+#######################################
+_jev_key() {
+  if [[ -n "${REPOS_TYPESAFE_API_KEY:-}" ]]; then
+    printf '%s' "$REPOS_TYPESAFE_API_KEY"
+  elif [[ -n "${JEV_KEY:-}" ]]; then
+    printf '%s' "$JEV_KEY"
+  elif [[ -f .env ]]; then
+    local pattern='REPOS_TYPESAFE_API_KEY|JEV_KEY'
+    sed -nE "s/^[[:space:]]*(${pattern})[[:space:]]*=[[:space:]]*//p" .env \
+      | head -1 \
+      | tr -d '\r'
+  fi
+}
+
+#######################################
+# Build a one-line, tab/newline-free descriptor from cheap local git facts.
+# Globals:
+#   None
+# Arguments:
+#   abs: absolute path to the repository.
+# Outputs:
+#   Writes remote, README heading, branches, and commit subjects to stdout.
+#######################################
+_repo_descriptor() {
+  local abs="$1" remote bare readme branches commits
+  remote=$(git -C "$abs" config --get remote.origin.url 2>/dev/null || true)
+  bare=$(git -C "$abs" rev-parse --is-bare-repository 2>/dev/null || true)
+  branches=$(git -C "$abs" for-each-ref --count=6 \
+    --format='%(refname:short)' refs/heads 2>/dev/null \
+    | tr '\n' ' ')
+  commits=$(git -C "$abs" log --no-merges -3 --pretty=%s 2>/dev/null \
+    | tr '\n' ' ')
+  if [[ "$bare" == "true" ]]; then
+    readme=$(git -C "$abs" show HEAD:README.md 2>/dev/null \
+      | grep -m1 '^#')
+  else
+    readme=$(head -30 "$abs/README.md" "$abs/README" "$abs/readme.md" \
+      2>/dev/null \
+      | grep -m1 '^#')
+  fi
+  # host/owner/name is already the choice key; the descriptor adds signal.
+  printf 'remote=%s | readme="%s" | branches=%s | recent=%s' \
+    "${remote:-none}" "${readme:-}" "${branches:-none}" "${commits:-none}" \
+    | tr '\t\n' '  '
+}
+
+#######################################
+# Resolve a plain-language description to one repo via a Jev Choice call.
+# Globals:
+#   REPOS_DIR, JEV_ENDPOINT, JEV_MODEL, JEV_CONFIDENCE
+# Arguments:
+#   description: the work to match against local repo descriptors.
+# Outputs:
+#   Writes the chosen absolute repo path to stdout; errors to stderr.
+# Returns:
+#   0 on a confident match, 2 on usage error, 1 on failure or abstention.
+#######################################
+_launch() {
+  local description="${1:-}"
+  if [[ -z "$description" ]]; then
+    printf 'usage: repos launch "<plain-language description>"\n' >&2
+    return 2
+  fi
+  if [[ ! -d "$REPOS_DIR" ]]; then
+    printf 'Repository directory not found: %s\n' "$REPOS_DIR" >&2
+    return 1
+  fi
+
+  local key
+  key=$(_jev_key)
+  if [[ -z "$key" ]]; then
+    printf 'launch: no REPOS_TYPESAFE_API_KEY set (env or ./.env) — ' >&2
+    printf 'falling back to fuzzy picker\n' >&2
+    printf 'Tip: r  (no key needed)\n' >&2
+    return 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    printf 'launch: jq not found in PATH\n' >&2
+    return 1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    printf 'launch: curl not found in PATH\n' >&2
+    return 1
+  fi
+
+  # Build a "rel<TAB>descriptor" table for every repo, using the same
+  # content-based discovery as the picker.
+  local table rel abs
+  table=""
+  while IFS= read -r abs; do
+    rel="${abs#"$REPOS_DIR"/}"
+    table+="$rel"$'\t'"$(_repo_descriptor "$abs")"$'\n'
+  done < <(_repos_repo_dirs | sort)
+
+  if [[ -z "$table" ]]; then
+    printf 'launch: no repositories under %s\n' "$REPOS_DIR" >&2
+    return 1
+  fi
+
+  # One Jev Choice call: state=description, criteria=every repo plus an
+  # explicit "none" so the model can abstain.
+  local body instructions
+  instructions='The state is a description of work someone was doing. '
+  instructions+='Choose the single repository whose descriptor best matches '
+  instructions+='that work; a criterion key is host/owner/name and its value '
+  instructions+='describes the repo. Choose none only if nothing plausibly '
+  instructions+='matches.'
+  body=$(printf '%s' "$table" \
+    | jq -Rs --arg state "$description" --arg model "$JEV_MODEL" \
+      --arg instructions "$instructions" '
+        split("\n") | map(select(length > 0)) | map(split("\t")) |
+        (map({ (.[0]): .[1] }) +
+         [{ "none": "No repository matches this description." }]
+         | add) as $crit |
+        { state: $state,
+          model: $model,
+          questions: { pick: {
+            type: "choice",
+            instructions: $instructions,
+            criteria: $crit
+          } } }
+      ')
+
+  local resp http_code
+  resp=$(curl --silent --show-error --fail-with-body \
+    -w $'\n%{http_code}' \
+    "$JEV_ENDPOINT" \
+    -H "Authorization: Bearer $key" \
+    -H "Content-Type: application/json" \
+    --data-binary "$body" 2>/dev/null) || {
+      printf 'launch: Jev request failed\n' >&2
+      return 1
+    }
+  http_code=${resp##*$'\n'}
+  resp=${resp%$'\n'*}
+  if [[ "$http_code" != 2* ]]; then
+    printf 'launch: Jev HTTP %s\n' "$http_code" >&2
+    printf '%s\n' "$resp" \
+      | jq -r '.error.message // .error // "no message"' >&2 2>/dev/null \
+      || printf '%s\n' "$resp" >&2
+    return 1
+  fi
+
+  local choice confidence
+  choice=$(printf '%s' "$resp" | jq -r '.answers.pick.choice // "none"')
+  confidence=$(printf '%s' "$resp" | jq -r '.answers.pick.confidence // 0')
+
+  if [[ "$choice" == "none" ]]; then
+    printf 'launch: no repo matched "%s"\n' "$description" >&2
+    return 1
+  fi
+
+  # Below the confidence floor, surface the ranked candidates and abstain
+  # (the rl hook falls back to the picker). Never a silent wrong jump.
+  local high
+  high=$(printf '%s' "$confidence" \
+    | jq -r --argjson f "$JEV_CONFIDENCE" '. >= $f')
+  if [[ "$high" != "true" ]]; then
+    printf 'launch: low confidence (%s) for "%s" → candidates:\n' \
+      "$confidence" "$description" >&2
+    printf '%s' "$resp" \
+      | jq -r '.answers.pick.probabilities
+        | to_entries
+        | sort_by(-.value)[]
+        | "\(.key)  (\(.value))"' >&2
+    return 1
+  fi
+
+  printf '%s' "$REPOS_DIR/$choice"
+}
+
 usage() {
   cat <<'EOF'
 repos — hop between your repos with ease
@@ -358,6 +562,10 @@ Env:
   REPOS_DIR               Directory containing repositories in URL format (default: $HOME/repos).
   REPOS_BARE              Default for clone/create: 1/true clones bare with a .git suffix,
                           0/false clones with a work tree. Default: 1. Flags override.
+  JEV_KEY                 TypeSafe API key. Enables `repos launch`. Falls back to
+                          fuzzy picker when unset.
+  JEV_CONFIDENCE          Min calibrated confidence (0-1) for launch to jump
+                          without asking (default: 0.5).
 
 Layout:
   <repos-dir>/<git-host-domain>/<repo-owner>/<repo-name>[.git]
@@ -366,7 +574,11 @@ Layout:
 
 Usage:
   r                                    Pick repo (then worktree, if any) and cd into it.
+  rl "<description>"                   Jump to the repo matching a plain-language
+                                       description (needs JEV_KEY).
   repos                                Print picked repo dir (used by shell hook: r).
+  repos launch "<desc>"                Print the matching repo dir via Jev, or nothing
+                                       (used by hook: rl).
   repos clone [flags] <src>            Clone into the layout, print the path.
                                        <src>: <https-url> | <ssh-url> | [host/]owner/repo
   repos create [flags] <owner/repo>    Init a new repo into the layout, print the path.
@@ -399,7 +611,7 @@ _init() {
   done
 
   printf '# repos init: %s\n' "$shell"
-  declare -f r
+  declare -f r rl
 
   # Tab completion for `repos` and `r`. The candidate list mirrors the picker:
   # a dir under REPOS_DIR is a repo if it holds a .git entry or a HEAD file.
@@ -541,6 +753,7 @@ main() {
   case "${1:-}" in
     clone) shift; _repos_clone "$@" ;;
     create) shift; _repos_create "$@" ;;
+    launch) shift; _launch "$@" ;;
     init) shift; _init "$@" ;;
     help|-h|--help) usage ;;
     "") _repos ;;

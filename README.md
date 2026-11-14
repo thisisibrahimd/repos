@@ -4,7 +4,10 @@ Hop between your repos with ease.
 
 ## Prereqs
 
-You must have [fzf](https://github.com/junegunn/fzf) installed.
+You must have [fzf](https://github.com/junegunn/fzf) installed. The optional
+`launch` feature also needs [jq](https://jqlang.github.io/jq/), `curl`, and a
+[TypeSafe](https://typesafe.ai) API key; `r` needs none of those and stays fully
+offline.
 
 ## Install
 
@@ -26,7 +29,8 @@ In order to change directories within your current shell session, you must add i
 configuration file. The hook also registers tab completion: `repos <Tab>` completes
 subcommands and flags, and `r <Tab>` completes repository paths (bare or work
 tree) under `$REPOS_DIR`, matched by full path or repo name. No extra tools
-are needed at completion time.
+are needed at completion time. The hook also installs `rl` for description-based
+jumps (see Launch by description below).
 
 Bash
 
@@ -106,6 +110,29 @@ Bare is the default; opt out per call with `--no-bare` or persistently with
 | --- | --- | --- |
 | `REPOS_DIR` | `~/repos` | Root of the repo tree |
 | `REPOS_BARE` | `1` | `0`/`false` makes clone/create non-bare; `--bare`/`--no-bare` override |
+| `REPOS_TYPESAFE_API_KEY` (or `JEV_KEY`) | unset | Enables `repos launch`; no key means `r` only |
+| `JEV_CONFIDENCE` | `0.5` | Minimum calibrated confidence before `launch` jumps without asking |
+
+## Launch by description (optional, uses Jev)
+
+When you don't remember a repo's name — only what you were doing in it — describe
+the work and `repos` jumps you there. The match is semantic, powered by
+[Jev](https://typesafe.ai), a fast decision model; it sees the same repos the
+picker sees, including bare ones and nested owners.
+
+```bash
+export REPOS_TYPESAFE_API_KEY="your-key"   # enables launch; r works without it
+rl "the one that handles the auth group sync"
+```
+
+`rl` is installed by `repos init`, alongside `r`. On a confident match it `cd`s
+into the repo; on a weak, absent, or API-error case it falls back to the ordinary
+`r` picker, so it is never a dead end. `repos launch "<desc>"` prints the path
+instead of changing directories (that is what the hook uses).
+
+Launch is **opt-in and online**: it sends only lightweight metadata — repo name,
+remote, README first heading, branch names, and recent commit subjects — never
+file contents. `r` never leaves your machine.
 
 ## Worktrees
 
