@@ -1,0 +1,9 @@
+# Generated demo repos — regenerate with ./examples/build.sh.
+# Each entry is itself a git repo; never commit them into this branch.
+/acme-repos/
+
+# Re-include this demo's .envrc (it holds only REPOS_DIR + JEV_CONFIDENCE, no
+# secrets) even though a global ~/.gitignore excludes .envrc files. A repo-level
+# negation beats the lower-precedence global ignore. Anyone who adds secrets to
+# an .envrc here must add them via .env instead — this file stays committed.
+!.envrc
