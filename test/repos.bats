@@ -7,6 +7,10 @@
 #   - REPOS_DIR points into $BATS_TEST_TMPDIR, never the real ~/repos.
 
 setup() {
+  # deterministic dummy identity: CI runners have no git user configured,
+  # and fixtures commit here (mono_fixture).
+  export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com
+  export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
   SCRIPT="$BATS_TEST_DIRNAME/../repos"
   FZF_STUB="$BATS_TEST_DIRNAME/stub/fzf"
   GIT_STUB="$BATS_TEST_DIRNAME/stub/git"
