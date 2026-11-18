@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Fake git for clone/create tests: logs each invocation to $GIT_STUB_LOG and
+# fabricates the resulting directory so picker rules can see it.
+# Real git is used elsewhere; put this dir first on PATH only when stubbing.
+printf '%s\n' "$*" >>"${GIT_STUB_LOG:-/dev/null}"
+
+bare=0
+dest=""
+for a in "$@"; do
+  case "$a" in
+    --bare) bare=1 ;;
+    -*) ;;
+    *) dest=$a ;;
+  esac
+done
+
+if [[ -n "$dest" ]]; then
+  mkdir -p "$dest"
+  if [[ "$bare" -eq 1 ]]; then
+    touch "$dest/HEAD"
+  else
+    mkdir -p "$dest/.git"
+  fi
+fi

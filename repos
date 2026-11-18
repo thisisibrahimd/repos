@@ -3,6 +3,221 @@ set -eu -o pipefail
 
 REPOS_DIR="${REPOS_DIR:-$HOME/repos}"
 
+# Shell function shipped to the user's shell via `repos init`. It cannot cd
+# from a child process, so it asks the picker for a path and cds itself.
+r() {
+  local dir
+  dir=$(command repos) || return
+  if [[ -n "$dir" ]]; then
+    builtin cd -- "$dir"
+  fi
+}
+
+# --- helpers ---------------------------------------------------------------
+
+# Resolve whether a git directory is bare or a work tree, by content:
+# non-bare holds a .git entry (file or dir), a bare git dir holds HEAD.
+# Echoes "bare", "work", or nothing.
+_repos_kind() {
+  if [[ -e "$1/.git" ]]; then
+    printf 'work'
+  elif [[ -f "$1/HEAD" ]]; then
+    printf 'bare'
+  fi
+}
+
+# Parse a clone/create source into _SRC_HOST/_SRC_OWNER/_SRC_REPO/_SRC_URL.
+# Accepted forms:
+#   https://host/owner[/subgroup...]/repo[.git][/]
+#   http://host/owner/repo.git
+#   git@host:owner[/subgroup...]/repo[.git]
+#   ssh://git@host/owner[/subgroup...]/repo[.git]
+#   owner/repo                     (shorthand, host defaults to github.com)
+#   host/owner[/subgroup...]/repo  (first segment containing a dot = host)
+# Shorthand sources are rebuilt as canonical ssh clone URLs:
+#   git@host:owner/repo.git
+_repos_parse_source() {
+  local src="$1" rest host path owner repo shorthand=0
+  _SRC_HOST="" _SRC_OWNER="" _SRC_REPO="" _SRC_URL=""
+
+  case "$src" in
+    https://*|http://*)
+      rest=${src#*://}
+      ;;
+    ssh://*)
+      rest=${src#ssh://}
+      # strip optional [user@] before the host
+      if [[ "${rest%%/*}" == *@* ]]; then
+        rest=${rest#*@}
+      fi
+      ;;
+    *:*/*)
+      # scp-style [user@]host:path
+      local scp_host=${src%%:*}
+      scp_host=${scp_host#*@}
+      rest="$scp_host/${src#*:}"
+      ;;
+    */*)
+      # shorthand: [host/]owner[/subgroup...]/repo
+      if [[ "${src%%/*}" == *.* ]]; then
+        rest=$src
+        shorthand=1
+      elif [[ "$src" != */*/* ]]; then
+        rest="github.com/$src"
+        shorthand=1
+      else
+        printf 'repos: cannot parse source: %s\n' "$src" >&2
+        printf 'accepted: <https-url> | <ssh-url> | [host/]owner/repo\n' >&2
+        return 1
+      fi
+      ;;
+    *)
+      printf 'repos: cannot parse source: %s\n' "$src" >&2
+      printf 'accepted: <https-url> | <ssh-url> | [host/]owner/repo\n' >&2
+      return 1
+      ;;
+  esac
+
+  # strip trailing slashes and .git suffix
+  while [[ "$rest" == */ ]]; do rest=${rest%/}; done
+  rest=${rest%.git}
+
+  host=${rest%%/*}
+  path=${rest#*/}
+
+  if [[ -z "$host" || -z "$path" || "$path" == "$rest" || "$path" == */ || "$path" == /* ]]; then
+    printf 'repos: cannot parse source: %s\n' "$src" >&2
+    printf 'accepted: <https-url> | <ssh-url> | [host/]owner/repo\n' >&2
+    return 1
+  fi
+
+  repo=${path##*/}
+  owner=${path%/*}
+  if [[ -z "$repo" || -z "$owner" || "$owner" == "$path" || "$owner" == /* || "$owner" == */ || "$owner" == *"//"* || "$path" == *"//"* || "$owner" == "." || "$owner" == ".." || "$repo" == "." || "$repo" == ".." ]]; then
+    printf 'repos: cannot parse source: %s\n' "$src" >&2
+    printf 'accepted: <https-url> | <ssh-url> | [host/]owner/repo\n' >&2
+    return 1
+  fi
+
+  _SRC_HOST="$host"
+  _SRC_OWNER="$owner"
+  _SRC_REPO="$repo"
+  if [[ "$shorthand" == "1" ]]; then
+    printf -v _SRC_URL 'git@%s:%s/%s.git' "$host" "$owner" "$repo"
+  else
+    _SRC_URL="$src"
+  fi
+}
+
+# Resolve bare flag: $1 = "1"/"0" from CLI (empty = not given), else
+# REPOS_BARE env (default "1"). Echoes "1" or "0".
+_repos_resolve_bare() {
+  local flag="${1:-}" v
+  if [[ -n "$flag" ]]; then
+    printf '%s' "$flag"
+    return 0
+  fi
+  v="${REPOS_BARE:-1}"
+  case "$v" in
+    1|true) printf '1' ;;
+    0|false) printf '0' ;;
+    *)
+      printf 'repos: invalid REPOS_BARE: %s (use 0/1/true/false)\n' "$v" >&2
+      return 2
+      ;;
+  esac
+}
+
+# Parse shared flags for clone/create. Sets _OPT_BARE_FLAG ("", "1", "0")
+# and _OPT_ARGS (positional args). Returns 2 on bad or help flags.
+_repos_parse_flags() {
+  _OPT_BARE_FLAG=""
+  _OPT_ARGS=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --bare) _OPT_BARE_FLAG=1 ;;
+      --no-bare) _OPT_BARE_FLAG=0 ;;
+      -h|--help) return 2 ;;
+      --*) printf 'repos: unknown flag: %s\n' "$1" >&2; return 2 ;;
+      *) _OPT_ARGS+=("$1") ;;
+    esac
+    shift
+  done
+  return 0
+}
+
+# Destination path for $REPOS_DIR layout: <dir>/<host>/<owner>/<repo>[.git]
+# Args: $1=bare("1"/"0"). Uses _SRC_HOST/_SRC_OWNER/_SRC_REPO.
+_repos_dest() {
+  local dest="$REPOS_DIR/$_SRC_HOST/$_SRC_OWNER/$_SRC_REPO"
+  if [[ "$1" == "1" ]]; then
+    dest="$dest.git"
+  fi
+  printf '%s' "$dest"
+}
+
+# --- commands --------------------------------------------------------------
+
+_repos_clone() { _repos_add clone "$@"; }
+_repos_create() { _repos_add create "$@"; }
+
+# Shared implementation for clone/create. $1 = "clone" | "create".
+_repos_add() {
+  local cmd="$1"; shift
+  local usage_line
+  if [[ "$cmd" == clone ]]; then
+    usage_line='usage: repos clone [--bare|--no-bare] <url|owner/repo>'
+  else
+    usage_line='usage: repos create [--bare|--no-bare] <[host/]owner/repo>'
+  fi
+
+  local rc=0
+  _repos_parse_flags "$@" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    printf '%s\n' "$usage_line" >&2
+    return "$rc"
+  fi
+  set -- "${_OPT_ARGS[@]+"${_OPT_ARGS[@]}"}"
+  if [[ $# -ne 1 ]]; then
+    printf '%s\n' "$usage_line" >&2
+    return 2
+  fi
+
+  command -v git >/dev/null 2>&1 || { printf 'repos: git not found in PATH\n' >&2; return 1; }
+
+  _repos_parse_source "$1" || return 1
+
+  local bare
+  rc=0
+  bare=$(_repos_resolve_bare "$_OPT_BARE_FLAG") || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    return "$rc"
+  fi
+
+  local dest
+  dest=$(_repos_dest "$bare")
+  if [[ -e "$dest" ]]; then
+    printf 'repos: destination already exists: %s\n' "$dest" >&2
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$dest")"
+  if [[ "$cmd" == clone ]]; then
+    if [[ "$bare" == "1" ]]; then
+      git clone --bare "$_SRC_URL" "$dest" >&2 || return 1
+    else
+      git clone "$_SRC_URL" "$dest" >&2 || return 1
+    fi
+  else
+    if [[ "$bare" == "1" ]]; then
+      git init --bare "$dest" >&2 || return 1
+    else
+      git init "$dest" >&2 || return 1
+    fi
+  fi
+  printf '%s\n' "$dest"
+}
+
 _repos() {
   if [[ ! -d "$REPOS_DIR" ]]; then
     printf 'Repository directory not found: %s\n' "$REPOS_DIR" >&2
@@ -12,38 +227,106 @@ _repos() {
     printf 'fzf not found in PATH\n' >&2
     return 1
   fi
-
-  local dir
-  dir=$(
-    find "$REPOS_DIR" -type d -mindepth 3 -maxdepth 3 |
-    rev |
-    cut -d/ -f1-3 |
-    rev |
-    fzf
-  ) || return 0
-  printf '%s' "$REPOS_DIR/$dir"
-}
-
-r() {
-  local dir
-  dir=$(command repos) || return
-  if [[ -n "$dir" ]]; then
-    builtin cd -- "$dir"
+  if ! command -v git >/dev/null 2>&1; then
+    printf 'git not found in PATH\n' >&2
+    return 1
   fi
+
+  local tab=$'\t'
+  local sel
+  sel=$(
+    find "$REPOS_DIR" -mindepth 2 -type d \
+      \( \( -name '*.git' ! -name '.git' -exec test -e '{}/HEAD' \; \) \
+         -o -exec test -e '{}/.git' \; \) \
+      -prune -print |
+    while IFS= read -r d; do
+      rel=${d#"$REPOS_DIR/"}
+      kind=$(_repos_kind "$d")
+      printf '%s%s(%s)\n' "$rel" "$tab" "$kind"
+    done |
+    sort |
+    fzf --delimiter "$tab" --with-nth 1
+  ) || return 0
+  sel=${sel%%"$tab"*}
+  [[ -n "$sel" ]] || return 0
+
+  # Resolve symlinks so paths match `git worktree list` output exactly.
+  local abs
+  abs=$(cd "$REPOS_DIR/$sel" 2>/dev/null && pwd -P) || return 0
+  local worktrees n=0
+  worktrees=$(git -C "$abs" worktree list --porcelain 2>/dev/null) || worktrees=""
+  while IFS= read -r line; do
+    case "$line" in worktree\ *) n=$((n + 1)) ;; esac
+  done <<<"$worktrees"
+
+  # A bare repo or work tree with no extra worktrees: hop straight in.
+  if [[ "$n" -le 1 ]]; then
+    printf '%s' "$abs"
+    return 0
+  fi
+
+  # Two or more worktrees: pick which one to enter.
+  local -a wt_paths=()
+  local -a wt_labels=()
+  local i=0 p
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        p=${line#worktree }
+        wt_paths+=("$p")
+        if [[ "$p" == "$abs" ]]; then
+          local kind
+          kind=$(_repos_kind "$abs")
+          wt_labels+=("${sel##*/}${tab}(${kind})")
+        else
+          wt_labels+=("${p#"$abs/"}${tab}(worktree)")
+        fi
+        i=$((i + 1))
+        ;;
+    esac
+  done <<<"$worktrees"
+
+  sel=$(
+    for i in "${!wt_labels[@]}"; do
+      printf '%s%s%s\n' "${wt_labels[$i]}" "$tab" "$i"
+    done |
+    fzf --delimiter "$tab" --with-nth 1..2
+  ) || return 0
+  local idx=${sel##*"$tab"}
+  printf '%s' "${wt_paths[$idx]}"
 }
 
 usage() {
   cat <<'EOF'
-repos — hop between your repos in ease
+repos — hop between your repos with ease
 
 Env:
   REPOS_DIR               Directory containing repositories in URL format (default: $HOME/repos).
+  REPOS_BARE              Default for clone/create: 1/true clones bare with a .git suffix,
+                          0/false clones with a work tree. Default: 1. Flags override.
+
+Layout:
+  <repos-dir>/<git-host-domain>/<repo-owner>/<repo-name>[.git]
+  Bare and non-bare repos are detected by content, so owner subgroups
+  (e.g. gitlab.com/group/subgroup/repo) are supported at any depth.
 
 Usage:
-  r                       Pick repo via fzf and cd into it.
-  repos                   Print picked repo dir (used by shell hook: r).
-  repos init [bash|zsh]   Print shell hook.
-  repos --help            Print usage instructions.
+  r                                    Pick repo (then worktree, if any) and cd into it.
+  repos                                Print picked repo dir (used by shell hook: r).
+  repos clone [flags] <src>            Clone into the layout, print the path.
+                                       <src>: <https-url> | <ssh-url> | [host/]owner/repo
+  repos create [flags] <owner/repo>    Init a new repo into the layout, print the path.
+  repos init [bash|zsh]                Print shell hook.
+  repos --help                         Print usage instructions.
+
+Clone/create flags:
+  --bare                  Force a bare repository (default), name suffixed with .git.
+  --no-bare               Force a repository with a work tree, no suffix.
+
+Worktrees:
+  repos lists worktrees of the picked repository and offers them, so r can hop
+  straight into one. Create new worktrees with worktrunk: run `wt switch <branch>`
+  inside a bare repo.
 EOF
 }
 
@@ -70,6 +353,8 @@ EOF
 
 main() {
   case "${1:-}" in
+    clone) shift; _repos_clone "$@" ;;
+    create) shift; _repos_create "$@" ;;
     init) shift; _init "$@" ;;
     help|-h|--help) usage ;;
     "") _repos ;;
@@ -77,4 +362,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

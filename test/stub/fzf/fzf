@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Fake fzf with multi-invocation support.
+#
+# Env:
+#   FZF_SELECT        substring picked on the 1st invocation
+#   FZF_SELECT2       substring picked on the 2nd (e.g. worktree stage)
+#   FZF_STUB_LOG      file: 1st invocation's full list is written here
+#   FZF_STUB_LOG2     file: 2nd invocation's list
+#   FZF_STUB_COUNT    file holding invocation count between calls
+#   FZF_CANCEL_STAGE  "1" or "2": exit 130 on that invocation (simulated Esc)
+#
+# No FZF_SELECT*: prints the first line.
+
+data=$(cat)
+
+n=1
+if [[ -n "${FZF_STUB_COUNT:-}" ]]; then
+  [[ -f "$FZF_STUB_COUNT" ]] && n=$(( $(cat "$FZF_STUB_COUNT") + 1 ))
+  echo "$n" >"$FZF_STUB_COUNT"
+fi
+
+pick="${FZF_SELECT:-}"
+log="${FZF_STUB_LOG:-}"
+if [[ "$n" -ge 2 ]]; then
+  pick="${FZF_SELECT2:-}"
+  log="${FZF_STUB_LOG2:-}"
+fi
+if [[ "${FZF_CANCEL_STAGE:-}" == "$n" ]]; then
+  exit 130
+fi
+
+if [[ -n "$log" ]]; then
+  printf '%s\n' "$data" >"$log"
+fi
+
+if [[ -n "$pick" ]]; then
+  printf '%s\n' "$data" | grep -m1 -- "$pick" || exit 130
+else
+  printf '%s\n' "$data" | sed -n '1p'
+fi
