@@ -37,11 +37,38 @@ _repos_kind() {
 # Shorthand sources are rebuilt as canonical ssh clone URLs:
 #   git@host:owner/repo.git
 _repos_parse_source() {
-  local src="$1" rest host path owner repo shorthand=0
+  local src="$1" rest host path owner repo seg shorthand=0
   _SRC_HOST="" _SRC_OWNER="" _SRC_REPO="" _SRC_URL=""
 
+  # Never hand git an argument starting with "-": it would parse as an option.
   case "$src" in
-    https://*|http://*)
+    -*)
+      printf 'repos: source must not start with "-": %s\n' "$src" >&2
+      return 1
+      ;;
+    # Reject exotic transports (ext::, fork::, capture::...) that execute
+    # commands, and anything else with a doubled colon.
+    *::* | *:/*:*)
+      printf 'repos: unsupported source scheme: %s\n' "$src" >&2
+      printf 'accepted: <https-url> | <ssh-url> | [host/]owner/repo\n' >&2
+      return 1
+      ;;
+  esac
+
+  # Explicit transport schemes must be git-protocol schemes.
+  if [[ "$src" == *://* ]]; then
+    local scheme=${src%%://*}
+    case "$scheme" in
+      http | https | ssh | git) : ;;
+      *)
+        printf 'repos: unsupported scheme "%s": %s\n' "$scheme" "$src" >&2
+        return 1
+        ;;
+    esac
+  fi
+
+  case "$src" in
+    https://*|http://*|git://*)
       rest=${src#*://}
       ;;
     ssh://*)
@@ -93,11 +120,27 @@ _repos_parse_source() {
 
   repo=${path##*/}
   owner=${path%/*}
-  if [[ -z "$repo" || -z "$owner" || "$owner" == "$path" || "$owner" == /* || "$owner" == */ || "$owner" == *"//"* || "$path" == *"//"* || "$owner" == "." || "$owner" == ".." || "$repo" == "." || "$repo" == ".." ]]; then
+
+  # Validate every owner/repo segment: no empty, no dot traversal, and no
+  # tab/newline (those corrupt the picker's tab-separated label columns).
+  if [[ -z "$repo" || -z "$owner" || "$owner" == "$path" || "$owner" == /* || "$path" == */ ]]; then
     printf 'repos: cannot parse source: %s\n' "$src" >&2
     printf 'accepted: <https-url> | <ssh-url> | [host/]owner/repo\n' >&2
     return 1
   fi
+  local tocheck="$host/$owner/$repo"
+  while [[ -n "$tocheck" ]]; do
+    seg=${tocheck%%/*}
+    if [[ "$seg" == "$tocheck" ]]; then
+      tocheck=""
+    else
+      tocheck=${tocheck#*/}
+    fi
+    if [[ -z "$seg" || "$seg" == "." || "$seg" == ".." || "$seg" == *$'\t'* || "$seg" == *$'\n'* ]]; then
+      printf 'repos: invalid path segment in source: %s\n' "$src" >&2
+      return 1
+    fi
+  done
 
   _SRC_HOST="$host"
   _SRC_OWNER="$owner"
@@ -196,6 +239,14 @@ _repos_add() {
 
   local dest
   dest=$(_repos_dest "$bare")
+  # Defense in depth: a parsed path must stay inside REPOS_DIR.
+  case "$dest" in
+    "$REPOS_DIR"/*) : ;;
+    *)
+      printf 'repos: refusing destination outside REPOS_DIR: %s\n' "$dest" >&2
+      return 1
+      ;;
+  esac
   if [[ -e "$dest" ]]; then
     printf 'repos: destination already exists: %s\n' "$dest" >&2
     return 1
@@ -204,15 +255,15 @@ _repos_add() {
   mkdir -p "$(dirname "$dest")"
   if [[ "$cmd" == clone ]]; then
     if [[ "$bare" == "1" ]]; then
-      git clone --bare "$_SRC_URL" "$dest" >&2 || return 1
+      git clone --bare -- "$_SRC_URL" "$dest" >&2 || return 1
     else
-      git clone "$_SRC_URL" "$dest" >&2 || return 1
+      git clone -- "$_SRC_URL" "$dest" >&2 || return 1
     fi
   else
     if [[ "$bare" == "1" ]]; then
-      git init --bare "$dest" >&2 || return 1
+      git init --bare -- "$dest" >&2 || return 1
     else
-      git init "$dest" >&2 || return 1
+      git init -- "$dest" >&2 || return 1
     fi
   fi
   printf '%s\n' "$dest"
@@ -241,6 +292,9 @@ _repos() {
       -prune -print |
     while IFS= read -r d; do
       rel=${d#"$REPOS_DIR/"}
+      # A directory name containing a tab would corrupt the label columns.
+      # bash 3.2 cannot parse *"$tab"* in a case pattern; use [[ ]].
+      if [[ "$rel" == *"$tab"* ]]; then continue; fi
       kind=$(_repos_kind "$d")
       printf '%s%s(%s)\n' "$rel" "$tab" "$kind"
     done |

@@ -94,6 +94,46 @@ eval_fn() {
   [ "$status" -eq 1 ]
 }
 
+@test "parse: rejects url-form dot-dot traversal in owner" {
+  eval_fn '_repos_parse_source https://github.com/o/../../../../outside/victim.git'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid path segment"* ]]
+}
+
+@test "parse: rejects dot-dot as host segment" {
+  eval_fn '_repos_parse_source https://../../etc/passwd'
+  [ "$status" -eq 1 ]
+}
+
+@test "parse: rejects source starting with dash" {
+  eval_fn '_repos_parse_source -c protocol.ext.enabled=true/x/y'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'must not start with "-"'* ]]
+}
+
+@test "parse: rejects ext:: command-exec transport" {
+  eval_fn "_repos_parse_source \"ext::sh -c touch /tmp/pwned\""
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"unsupported source scheme"* ]]
+}
+
+@test "parse: rejects unknown scheme" {
+  eval_fn '_repos_parse_source fish://github.com/o/r'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"unsupported scheme"* ]]
+}
+
+@test "parse: accepts git:// scheme" {
+  eval_fn '_repos_parse_source git://github.com/o/r && printf "%s|%s" "$_SRC_HOST" "$_SRC_URL"'
+  [ "$status" -eq 0 ]
+  [ "$output" = "github.com|git://github.com/o/r" ]
+}
+
+@test "parse: rejects tab in repo segment" {
+  eval_fn '_repos_parse_source "owner/re	po"'
+  [ "$status" -eq 1 ]
+}
+
 # --- bare resolution ---------------------------------------------------------
 
 @test "bare: default is 1" {
@@ -135,7 +175,7 @@ eval_fn() {
   [ -f "$REPOS/github.com/markazos/markazos.git/HEAD" ]
   [ -f "$BATS_TEST_TMPDIR/git.log" ]
   run cat "$BATS_TEST_TMPDIR/git.log"
-  [ "$output" = "clone --bare https://github.com/markazos/markazos.git $REPOS/github.com/markazos/markazos.git" ]
+  [ "$output" = "clone --bare -- https://github.com/markazos/markazos.git $REPOS/github.com/markazos/markazos.git" ]
 }
 
 @test "clone: --no-bare gives work tree without suffix" {
@@ -162,13 +202,20 @@ eval_fn() {
   run_repos_gitstub clone markazos/markazos
   [ "$status" -eq 0 ]
   run cat "$BATS_TEST_TMPDIR/git.log"
-  [ "$output" = "clone --bare git@github.com:markazos/markazos.git $REPOS/github.com/markazos/markazos.git" ]
+  [ "$output" = "clone --bare -- git@github.com:markazos/markazos.git $REPOS/github.com/markazos/markazos.git" ]
 }
 
 @test "clone: creates nested owner dirs" {
   run_repos_gitstub clone https://gitlab.com/group/subgroup/repo.git
   [ "$status" -eq 0 ]
   [ -f "$REPOS/gitlab.com/group/subgroup/repo.git/HEAD" ]
+}
+
+@test "clone: refuses traversal url, creates nothing outside REPOS_DIR" {
+  mkdir -p "$BATS_TEST_TMPDIR/elsewhere"
+  run_repos_gitstub clone "https://github.com/o/../../../elsewhere/victim.git"
+  [ "$status" -eq 1 ]
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/elsewhere")" ]
 }
 
 @test "clone: refuses existing destination" {
@@ -203,7 +250,7 @@ eval_fn() {
   [ "$status" -eq 0 ]
   [ "$output" = "$REPOS/github.com/thisisibrahimd/newrepo.git" ]
   run cat "$BATS_TEST_TMPDIR/git.log"
-  [ "$output" = "init --bare $REPOS/github.com/thisisibrahimd/newrepo.git" ]
+  [ "$output" = "init --bare -- $REPOS/github.com/thisisibrahimd/newrepo.git" ]
 }
 
 @test "create: --no-bare gives work tree" {
@@ -255,6 +302,20 @@ make_fixtures() {
   [[ "$output" != *stray* ]]
   [[ "$output" != *emptyowner* ]]
   [[ "$output" != *outer/inner* ]]
+}
+
+@test "picker: skips entries whose name contains a tab" {
+  make_fixtures
+  mkdir -p "$REPOS/github.com/o/weird	1.git"
+  touch "$REPOS/github.com/o/weird	1.git/HEAD"
+  FZF_STUB_LOG="$BATS_TEST_TMPDIR/list" \
+    PATH="$FZF_STUB:$PATH" REPOS_DIR="$REPOS" run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  run cat "$BATS_TEST_TMPDIR/list"
+  [[ "$output" != *weird* ]]
+  # every listed line is exactly path<TAB>(kind)
+  run bash -c "awk -F'\t' 'NF != 2 { exit 1 }' '$BATS_TEST_TMPDIR/list'"
+  [ "$status" -eq 0 ]
 }
 
 @test "picker: worktree-less bare repo returns its root, no second stage" {
