@@ -67,7 +67,7 @@ other git hosts.
 ```bash
 # ~/.zshrc
 # default is ~/repos
-export REPOS_DIR=~/code
+export REPOS_DIR=~/repos
 ```
 
 3. After successfuly configuration of the cli and implementation of folder structure, you may simply run ```repos``` to hop into any repo of your choosing with ```fzf```.
