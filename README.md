@@ -81,12 +81,12 @@ GitLab subgroups (`gitlab.com/group/subgroup/repo`) work at any depth.
 
 ```bash
 # clone bare (default), into the layout below, prints the path
-repos clone https://github.com/markazos/markazos.git
-repos clone git@github.com:markazos/markazos.git
-repos clone markazos/markazos          # shorthand, host defaults to github.com
+repos clone https://github.com/thisisibrahimd/repos.git
+repos clone git@github.com:thisisibrahimd/repos.git
+repos clone thisisibrahimd/repos          # shorthand, host defaults to github.com
 
 # clone with a work tree, no .git suffix
-repos clone --no-bare https://github.com/markazos/markazos.git
+repos clone --no-bare https://github.com/thisisibrahimd/repos.git
 
 # start a new repo under your own owner
 repos create thisisibrahimd/my-new-repo
