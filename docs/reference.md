@@ -14,6 +14,15 @@ Env:
   REPOS_DIR   Directory containing repositories in URL format (default: $HOME/repos).
   REPOS_BARE  Default for clone/create: 1/true clones bare with a .git suffix,
               0/false clones with a work tree. Default: 1. Flags override.
+  REPOS_TYPESAFE_API_KEY  TypeSafe API key (JEV_KEY also works). Enables
+              repos launch; without it the r picker stays fully offline.
+  JEV_CONFIDENCE  Minimum calibrated confidence (0-1) before launch jumps
+              without asking (default: 0.5).
+
+Launch:
+  The rl shell hook (installed by repos init) uses repos launch to resolve a
+  plain-language description to one repo via Jev. On a weak or missing match
+  it falls back to r. Only repo metadata is sent, never file contents.
 
 Worktrees:
   repos lists worktrees of the picked repository and offers them, so r can hop
@@ -29,6 +38,14 @@ Pick a repo (then a worktree) with fzf and cd into it
 
 ```
 r
+```
+
+**Hop by description**
+
+Jump to the repo matching a description via Jev (needs a key)
+
+```
+rl "the one that handles the auth group sync"
 ```
 
 **Clone shorthand**
@@ -74,6 +91,15 @@ Init a new repo into the layout, print the path
 ### Flags
 - **`--bare`** — Force a bare repository (default), name suffixed with .git
 - **`--no-bare`** — Force a repository with a work tree, no suffix
+
+## `repos launch`
+
+- **Usage:** `repos launch <desc>`
+
+Print the repo matching a description via Jev, or nothing
+
+### Arguments
+- **`<desc>`** — Plain-language description of the work to find
 
 ## `repos init`
 
