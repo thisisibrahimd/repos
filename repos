@@ -417,11 +417,11 @@ _repo_descriptor() {
     | tr '\n' ' ')
   if [[ "$bare" == "true" ]]; then
     readme=$(git -C "$abs" show HEAD:README.md 2>/dev/null \
-      | grep -m1 '^#')
+      | grep -m1 '^#') || true
   else
     readme=$(head -30 "$abs/README.md" "$abs/README" "$abs/readme.md" \
       2>/dev/null \
-      | grep -m1 '^#')
+      | grep -m1 '^#') || true
   fi
   # host/owner/name is already the choice key; the descriptor adds signal.
   printf 'remote=%s | readme="%s" | branches=%s | recent=%s' \
