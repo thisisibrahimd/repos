@@ -17,8 +17,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: install bats
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bats
+      - name: setup mise (bats, usage)
+        uses: jdx/mise-action@v2 # installs tools from mise.toml, adds them to PATH
+
+      - name: docs are fresh
+        run: |
+          usage lint repos.usage.kdl
+          usage generate markdown --file repos.usage.kdl --out-file docs/reference.md
+          git diff --exit-code docs/reference.md
 
       - name: verify
         run: |

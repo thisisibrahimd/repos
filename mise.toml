@@ -1,2 +1,15 @@
 [tools]
 bats = "latest"
+usage = "7.4.0"
+
+# Docs and completions come from the spec. usage is a dev tool only: the repos
+# script ships hand-written help and hand-written shell completions, so users
+# need nothing beyond bash/zsh, git, and fzf.
+[tasks.lint]
+run = "usage lint repos.usage.kdl"
+
+[tasks.docs]
+run = "usage generate markdown --file repos.usage.kdl --out-file docs/reference.md"
+
+[tasks.test]
+run = "bats test/repos.bats"
