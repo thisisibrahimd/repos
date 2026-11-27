@@ -490,6 +490,8 @@ bare_launch_fixture() {
   run cat "$log"
   [[ "$output" == *"https://api.typesafe.ai/v1/systemone"* ]]
   [[ "$output" == *"Authorization: Bearer test-key"* ]]
+  [[ "$output" == *$'--retry\n2'* ]]
+  [[ "$output" == *$'--retry-delay\n1'* ]]
   [[ "$output" == *'"model": "jev-latest"'* ]]
   [[ "$output" == *'"state": "search application logs"'* ]]
   [[ "$output" == *'"github.com/acme/owl":'* ]]

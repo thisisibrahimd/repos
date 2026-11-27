@@ -627,6 +627,7 @@ _launch() {
 
   local resp http_code
   resp=$(curl --silent --show-error --fail-with-body \
+    --retry 2 --retry-delay 1 \
     -w $'\n%{http_code}' \
     "$JEV_ENDPOINT" \
     -H "Authorization: Bearer $key" \
@@ -683,7 +684,7 @@ _launch() {
 #   Writes the help text to stdout.
 #######################################
 usage() {
-  cat <<'EOF'
+  cat <<'HELPMSG'
 repos — hop between your repos with ease
 
 Env:
@@ -730,7 +731,7 @@ Worktrees:
   repos lists worktrees of the picked repository and offers them, so r can
   hop straight into one. Create new worktrees with worktrunk: run
   `wt switch <branch>` inside a bare repo.
-EOF
+HELPMSG
 }
 
 #######################################
@@ -884,13 +885,13 @@ REPOS_INIT_ZSH
       ;;
   esac
 
-  cat <<EOF
+  cat <<INITNOTES
 # =============================================================================
 #
 # To initialize repos, add this to your shell configuration file:
 #
 # eval "\$\(repos init $shell\)"
-EOF
+INITNOTES
 }
 
 #######################################
