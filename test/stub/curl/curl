@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Stub curl for launch tests: logs argv and replies with a canned body/code.
+printf '%s\n' "$@" > "$CURL_LOG"
+printf '%s\n%s\n' "${CURL_RESPONSE:-{\}}" "${CURL_CODE:-200}"

@@ -14,7 +14,8 @@ setup() {
   SCRIPT="$BATS_TEST_DIRNAME/../repos"
   FZF_STUB="$BATS_TEST_DIRNAME/stub/fzf"
   GIT_STUB="$BATS_TEST_DIRNAME/stub/git"
-  chmod +x "$FZF_STUB/fzf" "$GIT_STUB/git"
+  CURL_STUB="$BATS_TEST_DIRNAME/stub/curl"
+  chmod +x "$FZF_STUB/fzf" "$GIT_STUB/git" "$CURL_STUB/curl"
   REPOS="$BATS_TEST_TMPDIR/repos"
   mkdir -p "$REPOS"
   # physical path: macOS $TMPDIR is under the /var -> /private/var symlink
@@ -447,4 +448,98 @@ mono_fixture() {
   run_repos_gitstub clone "https://github.com/some owner/some repo.git"
   [ "$status" -eq 0 ]
   [ -f "$REPOS/github.com/some owner/some repo.git/HEAD" ]
+}
+
+# --- repos launch ----------------------------------------------------------
+
+launch_fixture() {
+  local dir="$REPOS/github.com/acme/owl"
+  mkdir -p "$dir"
+  printf '# Owl\n' > "$dir/README.md"
+  git -C "$dir" init -q
+  git -C "$dir" add README.md
+  git -C "$dir" commit -q -m "feat: query loki for app logs"
+}
+
+bare_launch_fixture() {
+  local work="$BATS_TEST_TMPDIR/work-owl"
+  git init -q "$work"
+  printf '# Owl\n' > "$work/README.md"
+  git -C "$work" add README.md
+  git -C "$work" commit -q -m "feat: query loki for app logs"
+  git clone --bare -q "$work" "$REPOS/github.com/acme/bare.git"
+}
+
+@test "launch: no key explains the fallback" {
+  run env -u REPOS_TYPESAFE_API_KEY -u JEV_KEY REPOS_DIR="$REPOS" \
+    bash "$SCRIPT" launch "the billing one"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no REPOS_TYPESAFE_API_KEY set"* ]]
+  [[ "$output" == *"Tip: r"* ]]
+}
+
+@test "launch: sends one Jev Choice call and prints the matched path" {
+  launch_fixture
+  local log="$BATS_TEST_TMPDIR/curl.log"
+  local response='{"answers":{"pick":{"choice":"github.com/acme/owl","confidence":0.9,"probabilities":{"github.com/acme/owl":0.9,"none":0.1}}}}'
+  run env CURL_LOG="$log" CURL_RESPONSE="$response" CURL_CODE=200 \
+    PATH="$CURL_STUB:$PATH" REPOS_DIR="$REPOS" JEV_KEY=test-key \
+    bash "$SCRIPT" launch "search application logs"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$REPOS/github.com/acme/owl" ]
+  run cat "$log"
+  [[ "$output" == *"https://api.typesafe.ai/v1/systemone"* ]]
+  [[ "$output" == *"Authorization: Bearer test-key"* ]]
+  [[ "$output" == *'"model": "jev-latest"'* ]]
+  [[ "$output" == *'"state": "search application logs"'* ]]
+  [[ "$output" == *'"github.com/acme/owl":'* ]]
+}
+
+@test "launch: low confidence abstains and ranks candidates" {
+  launch_fixture
+  local response='{"answers":{"pick":{"choice":"github.com/acme/owl","confidence":0.2,"probabilities":{"github.com/acme/owl":0.2,"none":0.8}}}}'
+  run env CURL_LOG="$BATS_TEST_TMPDIR/curl-low.log" CURL_RESPONSE="$response" \
+    PATH="$CURL_STUB:$PATH" REPOS_DIR="$REPOS" JEV_KEY=test-key \
+    bash "$SCRIPT" launch "search application logs"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"low confidence (0.2)"* ]]
+  [[ "$output" == *"github.com/acme/owl"* ]]
+}
+
+@test "launch: none abstains" {
+  launch_fixture
+  local response='{"answers":{"pick":{"choice":"none","confidence":0.9,"probabilities":{"none":0.9}}}}'
+  run env CURL_LOG="$BATS_TEST_TMPDIR/curl-none.log" CURL_RESPONSE="$response" \
+    PATH="$CURL_STUB:$PATH" REPOS_DIR="$REPOS" JEV_KEY=test-key \
+    bash "$SCRIPT" launch "something unrelated"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no repo matched"* ]]
+}
+
+@test "launch: surfaces Jev error messages from HTTP failures" {
+  launch_fixture
+  run env CURL_LOG="$BATS_TEST_TMPDIR/curl-err.log" \
+    CURL_RESPONSE='{"error":{"message":"bad key"}}' CURL_CODE=401 \
+    PATH="$CURL_STUB:$PATH" REPOS_DIR="$REPOS" JEV_KEY=test-key \
+    bash "$SCRIPT" launch "search application logs"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Jev HTTP 401"* ]]
+  [[ "$output" == *"bad key"* ]]
+}
+
+@test "launch: sees bare repos through shared content-based discovery" {
+  bare_launch_fixture
+  local response='{"answers":{"pick":{"choice":"github.com/acme/bare.git","confidence":0.9,"probabilities":{"github.com/acme/bare.git":0.9,"none":0.1}}}}'
+  run env CURL_LOG="$BATS_TEST_TMPDIR/curl-bare.log" CURL_RESPONSE="$response" \
+    PATH="$CURL_STUB:$PATH" REPOS_DIR="$REPOS" JEV_KEY=test-key \
+    bash "$SCRIPT" launch "search application logs"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$REPOS/github.com/acme/bare.git" ]
+}
+
+@test "init hook installs rl alongside r" {
+  run bash "$SCRIPT" init bash
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rl ()"* ]]
+  [[ "$output" == *"command repos launch"* ]]
 }
