@@ -384,6 +384,65 @@ mono_fixture() {
   [[ "$output" == *"REPOS_BARE"* ]]
 }
 
+# --- completions (shipped via the init hook) --------------------------------
+
+@test "init bash: registers tab completion" {
+  run bash "$SCRIPT" init bash
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"complete -F _repos_completions repos"* ]]
+  [[ "$output" == *"complete -F _repos_r_completions r"* ]]
+}
+
+@test "init zsh: registers tab completion" {
+  run bash "$SCRIPT" init zsh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"compdef _repos_completions repos"* ]]
+  [[ "$output" == *"compdef _repos_r_completions r"* ]]
+}
+
+@test "bash helper: lists repo dirs, skips non-repos and depth-1 strays" {
+  make_fixtures
+  run bash -c "REPOS_DIR='$REPOS'; source <(bash '$SCRIPT' init bash); _repos_repo_dirs"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$REPOS/github.com/o/bare.git"* ]]
+  [[ "$output" == *"$REPOS/github.com/o/work"* ]]
+  [[ "$output" == *"$REPOS/gitlab.com/group/sub/deep.git"* ]]
+  [[ "$output" != *notrepo* ]]
+  [[ "$output" != *stray* ]]
+  [[ "$output" != *emptyowner* ]]
+  [[ "$output" != *.git/ ]] # no trailing slashes from the HEAD branch
+}
+
+@test "bash helper: subcommand and flag completion work" {
+  run bash -c "REPOS_DIR='$REPOS'; source <(bash '$SCRIPT' init bash);
+    COMP_WORDS=(repos c); COMP_CWORD=1; _repos_completions; printf '%s\n' \"\${COMPREPLY[@]}\""
+  [[ "$output" == *"clone"* ]]
+  [[ "$output" == *"create"* ]]
+  [[ "$output" != *"init"* ]]
+  run bash -c "source <(bash '$SCRIPT' init bash);
+    COMP_WORDS=(repos clone -); COMP_CWORD=2; _repos_completions; printf '%s\n' \"\${COMPREPLY[@]}\""
+  [[ "$output" == *"--bare"* ]]
+  [[ "$output" == *"--no-bare"* ]]
+}
+
+@test "bash helper: r completes by name suffix component" {
+  make_fixtures
+  run bash -c "REPOS_DIR='$REPOS'; source <(bash '$SCRIPT' init bash);
+    COMP_WORDS=(r deep); COMP_CWORD=1; _repos_r_completions; printf '%s\n' \"\${COMPREPLY[@]}\""
+  [ "$output" = "$REPOS/gitlab.com/group/sub/deep.git" ]
+}
+
+@test "zsh helper: lists repo dirs" {
+  command -v zsh || skip "no zsh"
+  make_fixtures
+  run zsh -c "REPOS_DIR='$REPOS'; source <(bash '$SCRIPT' init zsh); _repos_repo_dirs"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$REPOS/github.com/o/bare.git"* ]]
+  [[ "$output" == *"$REPOS/github.com/o/work"* ]]
+  [[ "$output" != *notrepo* ]]
+  [[ "$output" != *stray* ]]
+}
+
 @test "clone handles names with spaces" {
   run_repos_gitstub clone "https://github.com/some owner/some repo.git"
   [ "$status" -eq 0 ]

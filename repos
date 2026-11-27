@@ -370,8 +370,12 @@ Usage:
   repos clone [flags] <src>            Clone into the layout, print the path.
                                        <src>: <https-url> | <ssh-url> | [host/]owner/repo
   repos create [flags] <owner/repo>    Init a new repo into the layout, print the path.
-  repos init [bash|zsh]                Print shell hook.
+  repos init [bash|zsh]                Print shell hook (r + tab completion).
   repos --help                         Print usage instructions.
+
+Tab completion:
+  The shell hook completes repos subcommands/flags, and r completes repository
+  paths under REPOS_DIR (full path or repo name prefix). No runtime deps.
 
 Clone/create flags:
   --bare                  Force a bare repository (default), name suffixed with .git.
@@ -394,9 +398,137 @@ _init() {
     shift
   done
 
+  printf '# repos init: %s\n' "$shell"
+  declare -f r
+
+  # Tab completion for `repos` and `r`. The candidate list mirrors the picker:
+  # a dir under REPOS_DIR is a repo if it holds a .git entry or a HEAD file.
+  # .git hits are pruned so a work tree's .git/HEAD never shows up; .worktrees
+  # is pruned so worktree dirs stay out (repo-only completion, for now).
+  case "$shell" in
+    bash)
+      cat <<'REPOS_INIT_BASH'
+_repos_repo_dirs() {
+  local root=${REPOS_DIR:-$HOME/repos}
+  [ -d "$root" ] || return 0
+  find "$root" -maxdepth 7 -mindepth 3 \
+    \( -name .git -prune -print \) -o \
+    \( -name .worktrees -prune \) -o \
+    \( -type f -name HEAD -print \) 2>/dev/null |
+    while IFS= read -r p; do
+      case "$p" in
+        */.git) printf '%s\n' "${p%/.git}" ;;
+        *) printf '%s\n' "${p%/HEAD}" ;;
+      esac
+    done | sort -u
+}
+
+_repos_completions() {
+  local cur=${COMP_WORDS[COMP_CWORD]}
+  local i word sub=""
+  for ((i = 1; i < COMP_CWORD; i++)); do
+    word=${COMP_WORDS[i]}
+    case $word in
+      -*) ;;
+      *) sub=$word; break ;;
+    esac
+  done
+  COMPREPLY=()
+  case $sub in
+    '')
+      mapfile -t COMPREPLY < <(compgen -W 'clone create init help' -- "$cur")
+      ;;
+    clone | create)
+      if [[ $cur == -* ]]; then
+        mapfile -t COMPREPLY < <(compgen -W '--bare --no-bare' -- "$cur")
+      fi
+      ;;
+    init)
+      mapfile -t COMPREPLY < <(compgen -W 'bash zsh' -- "$cur")
+      ;;
+  esac
+  if ((${#COMPREPLY[@]} == 0)); then
+    compopt -o default 2>/dev/null || true
+  fi
+}
+
+_repos_r_completions() {
+  local cur=${COMP_WORDS[COMP_CWORD]} d
+  COMPREPLY=()
+  while IFS= read -r d; do
+    [[ -n $d && ($d == "$cur"* || ${d##*/} == "$cur"*) ]] && COMPREPLY+=("$d")
+  done < <(_repos_repo_dirs)
+  ((${#COMPREPLY[@]})) && compopt -o filenames 2>/dev/null || true
+}
+
+if command -v compgen >/dev/null 2>&1; then
+  complete -F _repos_completions repos
+  complete -F _repos_r_completions r
+fi
+REPOS_INIT_BASH
+      ;;
+    zsh)
+      cat <<'REPOS_INIT_ZSH'
+_repos_repo_dirs() {
+  local root=${REPOS_DIR:-$HOME/repos}
+  [ -d "$root" ] || return 0
+  find "$root" -maxdepth 7 -mindepth 3 \
+    \( -name .git -prune -print \) -o \
+    \( -name .worktrees -prune \) -o \
+    \( -type f -name HEAD -print \) 2>/dev/null |
+    while IFS= read -r p; do
+      case "$p" in
+        */.git) print -r -- "${p%/.git}" ;;
+        *) print -r -- "${p%/HEAD}" ;;
+      esac
+    done | sort -u
+}
+
+_repos_completions() {
+  local state line
+  typeset -A opt_args
+  if ((CURRENT == 2)) && [[ $words[CURRENT] != -* ]]; then
+    _values 'command' clone create init help
+    return
+  fi
+  case $words[2] in
+    init)
+      _values 'shell' bash zsh
+      ;;
+    clone | create)
+      if [[ $words[CURRENT] == -* ]]; then
+        _values 'flag' '--bare' '--no-bare'
+      else
+        _files -/
+      fi
+      ;;
+    *)
+      _files
+      ;;
+  esac
+}
+
+_repos_r_completions() {
+  local -a dirs
+  local d
+  while IFS= read -r d; do
+    [[ -n $d ]] || continue
+    if [[ -z $PREFIX || $d == "$PREFIX"* || ${d:t} == "$PREFIX"* ]]; then
+      dirs+=("$d")
+    fi
+  done < <(_repos_repo_dirs)
+  (( ${#dirs[@]} )) && compadd -a dirs
+}
+
+if (( $+functions[compdef] )); then
+  compdef _repos_completions repos
+  compdef _repos_r_completions r
+fi
+REPOS_INIT_ZSH
+      ;;
+  esac
+
   cat <<EOF
-# repos init: $shell
-$(declare -f r)
 # =============================================================================
 #
 # To initialize repos, add this to your shell configuration file:

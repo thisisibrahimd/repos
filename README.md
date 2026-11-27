@@ -23,7 +23,10 @@ mise use github:thisisibrahimd/repos
 ## Shell Integration
 
 In order to change directories within your current shell session, you must add init snippt to your respective shell
-configuration file.
+configuration file. The hook also registers tab completion: `repos <Tab>` completes
+subcommands and flags, and `r <Tab>` completes repository paths (bare or work
+tree) under `$REPOS_DIR`, matched by full path or repo name. No extra tools
+are needed at completion time.
 
 Bash
 
@@ -76,6 +79,10 @@ The picker finds repositories by content, not by depth: a directory is a repo if
 it holds a `.git` entry (work tree) or `HEAD` plus git dirs (bare). Repos are
 labelled `(bare)` or `(work)` in the picker, and nested owner paths such as
 GitLab subgroups (`gitlab.com/group/subgroup/repo`) work at any depth.
+
+Full CLI reference: [docs/reference.md](docs/reference.md), generated from
+[repos.usage.kdl](repos.usage.kdl) with [usage](https://github.com/jdx/usage).
+`usage` is a dev-only tool; it is never required at runtime or completion time.
 
 ## Creating and cloning
 
